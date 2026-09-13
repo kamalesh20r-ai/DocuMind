@@ -7,6 +7,10 @@ from google.genai import types
 import numpy as np
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
+load_dotenv()
+api_key = os.getenv("GEMINI_API_KEY")
+if not api_key:
+    api_key = st.secrets["GEMINI_API_KEY"]
 client = genai.Client(api_key=api_key)
 st.set_page_config(page_title="DocuMind",page_icon="📄",layout="wide")
 st.title("📄 DocuMind")
