@@ -81,3 +81,9 @@ Install dependencies:
 
 ```bash
 pip install -r requirements.txt
+
+## Live Demo
+
+Try DocuMind here:
+
+https://yh9wtytd6mylbhqnsge9rc.streamlit.app/
