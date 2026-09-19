@@ -5,6 +5,13 @@ import os
 from google import genai
 from google.genai import types
 import numpy as np
+import fitz
+from PIL import Image
+import io
+from difflib import SequenceMatcher
+import pytesseract
+import time
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
 load_dotenv()
@@ -12,6 +19,54 @@ api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
     api_key = st.secrets["GEMINI_API_KEY"]
 client = genai.Client(api_key=api_key)
+def remove_duplicate_text(native_text, ocr_text, threshold=0.85):
+    native_lines = [line.strip() for line in native_text.splitlines() if line.strip()]
+    ocr_lines = [line.strip() for line in ocr_text.splitlines() if line.strip()]
+    unique_ocr_lines = []
+    for ocr_line in ocr_lines:
+        is_duplicate = False
+        for native_line in native_lines:
+            similarity = SequenceMatcher(None,ocr_line.lower(),native_line.lower()).ratio()
+            if similarity >= threshold:
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            unique_ocr_lines.append(ocr_line)
+    combined_lines = native_lines + unique_ocr_lines
+    return "\n".join(combined_lines)
+def extract_hybrid_text(uploaded_file):
+    uploaded_file.seek(0)
+    pdf_bytes = uploaded_file.read()
+    pdf = fitz.open(stream=pdf_bytes,filetype="pdf")
+    full_text = ""
+    ocr_cache = {}
+    for page in pdf:
+        native_text = page.get_text("text")
+        page_ocr_text = ""
+        images = page.get_images(full=True)
+        for image_info in images:
+            xref = image_info[0]
+            if xref in ocr_cache:
+                page_ocr_text += ocr_cache[xref] + "\n"
+                continue
+            image_data = pdf.extract_image(xref)
+            image_bytes = image_data["image"]
+            image = Image.open(io.BytesIO(image_bytes))
+            image.thumbnail((1800, 1800))
+            ocr_text = pytesseract.image_to_string(image)
+            ocr_cache[xref] = ocr_text
+            page_ocr_text += ocr_text + "\n"
+        combined_page_text = remove_duplicate_text(native_text,page_ocr_text)
+        full_text += combined_page_text + "\n"
+    return full_text
+def create_embeddings_in_batches(client, chunks, batch_size=100):
+    all_embeddings = []
+    for start in range(0, len(chunks), batch_size):
+        batch = chunks[start:start + batch_size]
+        result = client.models.embed_content(model="gemini-embedding-2",contents=batch)
+        batch_embeddings = [embedding.values for embedding in result.embeddings]
+        all_embeddings.extend(batch_embeddings)
+    return all_embeddings
 st.set_page_config(page_title="DocuMind",page_icon="📄",layout="wide")
 st.title("📄 DocuMind")
 st.caption("AI-Powered Document Question Answering & Study Assistant")
@@ -39,20 +94,10 @@ with st.sidebar:
 uploaded_file = st.file_uploader("Upload Your PDF",type=["pdf"],accept_multiple_files=False)
 if uploaded_file is not None:
     st.success("PDF Uploaded Successfully")
-    reader = PdfReader(uploaded_file)
-    text = ""
-    low_text_pages = 0
-    for page in reader.pages:
-        page_text = page.extract_text() or ""
-        if len(page_text.strip()) < 50:
-            low_text_pages += 1
-        text += page_text + "\n"
-    total_pages = len(reader.pages)
-    image_like_ratio = low_text_pages / total_pages
-    if image_like_ratio > 0.30:
-        st.warning(f"This PDF contains many scanned/image-based pages "f"({low_text_pages} out of {total_pages} pages have very little extractable text). ""Some content may be missing. OCR support is required for full extraction.")
-    if len(text.strip()) < 1000:
-        st.warning("Very little text could be extracted from this PDF. " "The document may be scanned or image-based. " "OCR support will be added in a future version.")
+    uploaded_file.seek(0)
+    text = extract_hybrid_text(uploaded_file)
+    if len(text.strip()) < 100:
+        st.warning("Very little readable text could be extracted from this document.")
         st.stop()
     chunk_size = 1000
     overlap = 200
@@ -73,17 +118,29 @@ if uploaded_file is not None:
         for chunk in chunks:
             content = types.Content(parts=[types.Part.from_text(text=chunk)])
             contents.append(content)
-        with st.spinner("Creating document embeddings..."):
-            result = client.models.embed_content(model="gemini-embedding-2",contents=contents)
         embeddings = []
+        with st.spinner("Creating document embeddings..."):
+            batch_size = 100
+            for start in range(0, len(contents), batch_size):
+                batch = contents[start:start + batch_size]
+                while True:
+                    try:
+                        result = client.models.embed_content(model="gemini-embedding-2",contents=batch)
+                        break
+                    except Exception as e:
+                        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                            st.warning("Embedding rate limit reached. " "Waiting 60 seconds before retrying...")
+                            time.sleep(60)
+                        else:
+                            raise e
         for embedding in result.embeddings:
             embeddings.append(embedding.values)
         st.session_state.chunks = chunks
         st.session_state.embeddings = embeddings
-        st.session_state.processed_file_name = (uploaded_file.name)
+        st.session_state.processed_file_name = uploaded_file.name
         st.rerun()
-        st.success(f"Document processed successfully! " f"{len(st.session_state.chunks)} chunks indexed.")
     else:
+        st.success(f"Document processed successfully! " f"{len(st.session_state.chunks)} chunks indexed.")
         st.info("This document is already processed.")
         st.write("Total Embeddings Stored:",len(st.session_state.embeddings))
 if st.session_state.chunks is not None and st.session_state.embeddings is not None:
