@@ -14,8 +14,6 @@ import time
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
-load_dotenv()
-api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
     api_key = st.secrets["GEMINI_API_KEY"]
 client = genai.Client(api_key=api_key)
@@ -52,8 +50,11 @@ def extract_hybrid_text(uploaded_file):
             image_data = pdf.extract_image(xref)
             image_bytes = image_data["image"]
             image = Image.open(io.BytesIO(image_bytes))
+            width, height = image.size
+            if width < 200 or height < 100:
+                continue
             image.thumbnail((1800, 1800))
-            ocr_text = pytesseract.image_to_string(image)
+            ocr_text = pytesseract.image_to_string(image,config="--psm 6")
             ocr_cache[xref] = ocr_text
             page_ocr_text += ocr_text + "\n"
         combined_page_text = remove_duplicate_text(native_text,page_ocr_text)
@@ -78,6 +79,8 @@ if "processed_file_name" not in st.session_state:
     st.session_state.processed_file_name = None
 if "history" not in st.session_state:
     st.session_state.history = []
+if "extracted_characters" not in st.session_state:
+    st.session_state.extracted_characters = 0
 with st.sidebar:
     st.header("📄 DocuMind")
     st.write("Upload a PDF and ask questions based on its content.")
@@ -94,24 +97,24 @@ with st.sidebar:
 uploaded_file = st.file_uploader("Upload Your PDF",type=["pdf"],accept_multiple_files=False)
 if uploaded_file is not None:
     st.success("PDF Uploaded Successfully")
-    uploaded_file.seek(0)
-    text = extract_hybrid_text(uploaded_file)
-    if len(text.strip()) < 100:
-        st.warning("Very little readable text could be extracted from this document.")
-        st.stop()
-    chunk_size = 1000
-    overlap = 200
-    chunks = []
-    for i in range(0,len(text),chunk_size - overlap):
-        chunk = text[i:i + chunk_size]
-        chunks.append(chunk)
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Characters Extracted",len(text))
-    with col2:
-        st.metric("Chunks Created",len(chunks))
-    with st.expander("Preview extracted text"):
-        st.text(text[:1000])
+    if st.session_state.processed_file_name != uploaded_file.name:
+        st.session_state.history = []
+        with st.spinner("Extracting text and images..."):
+            uploaded_file.seek(0)
+            text = extract_hybrid_text(uploaded_file)
+        if len(text.strip()) < 100:
+            st.warning("Very little readable text could be extracted from this document.")
+            st.stop()
+        chunk_size = 1000
+        overlap = 200
+        chunks = []
+        for i in range(0, len(text), chunk_size - overlap):
+            chunk = text[i:i + chunk_size]
+            chunks.append(chunk)
+        if len(chunks) > 1000:
+            st.warning(f"This document produced {len(chunks)} chunks. " "Too much OCR text was extracted.")
+            st.stop()
+        st.session_state.extracted_characters = len(text)
     if (st.session_state.processed_file_name!= uploaded_file.name):
         st.session_state.history = []
         contents = []
@@ -133,14 +136,19 @@ if uploaded_file is not None:
                             time.sleep(60)
                         else:
                             raise e
-        for embedding in result.embeddings:
-            embeddings.append(embedding.values)
+                for embedding in result.embeddings:
+                    embeddings.append(embedding.values)
         st.session_state.chunks = chunks
         st.session_state.embeddings = embeddings
         st.session_state.processed_file_name = uploaded_file.name
         st.rerun()
     else:
-        st.success(f"Document processed successfully! " f"{len(st.session_state.chunks)} chunks indexed.")
+        st.success(f"Document processed successfully! "f"{len(st.session_state.chunks)} chunks indexed.")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Characters Extracted",st.session_state.extracted_characters)
+        with col2:
+            st.metric("Chunks Created",len(st.session_state.chunks))
         st.info("This document is already processed.")
         st.write("Total Embeddings Stored:",len(st.session_state.embeddings))
 if st.session_state.chunks is not None and st.session_state.embeddings is not None:
